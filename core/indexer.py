@@ -593,9 +593,9 @@ class Indexer:
 
                 parts = [text]
                 metadatas = [{'element_type': 'text'}]
+                vec_tables = []
 
                 if self.summarize_tables:
-                    vec_tables = []
                     table_summarizer = TableSummarizer(model_name=self.model_name, model_api_key=self.model_api_key)
                     for table in res['tables']:
                         table_md = convert(table)

@@ -65,3 +65,4 @@ python-docx==1.1.2
 html2markdown==0.1.7
 Pillow==10.4.0
 docling==2.15.1
+firebase-admin==6.6.0

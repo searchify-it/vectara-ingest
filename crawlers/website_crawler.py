@@ -78,6 +78,7 @@ class WebsiteCrawler(Crawler):
         else:
             logging.info(f"Collected {len(urls)} URLs to crawl and index.")
 
+        exit()
         # print some file types
         file_types = list(set([get_file_extension(u) for u in urls]))
         file_types = [t for t in file_types if t != ""]

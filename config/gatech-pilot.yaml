@@ -1,0 +1,21 @@
+vectara:
+  corpus_key: gatech-pilot-2
+  create_corpus: false
+  customer_id: 2729232395
+  reindex: true
+
+crawling:
+  crawler_type: website
+
+website_crawler:
+  urls: [
+"https://catalog.gatech.edu/",
+]
+  num_per_second: 15
+  pages_source: crawl
+  pos_regex: ['https:\/\/[^\/]*gatech\.edu.*']
+  ray_workers: 0
+  max_depth: 0
+  crawl_report: True
+  verbose: True
+  keep_query_params: True
