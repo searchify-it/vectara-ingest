@@ -81,6 +81,7 @@ def recursive_crawl(url: str, depth: int, pos_regex: List[Any], neg_regex: List[
             return doc.to_dict().get('visited', False)
         return False
     
+    # Race condition resolve
     if is_url_visited_in_firestore(url):
         return visited
 
@@ -95,20 +96,21 @@ def recursive_crawl(url: str, depth: int, pos_regex: List[Any], neg_regex: List[
         return visited
     try:
         res = indexer.fetch_page_contents(url)
-        new_urls = []
-        for u in res['links']:
-            full_url = urljoin(url, u) if url_is_relative(u) else u
-            if not is_url_visited_in_firestore(full_url):
-                add_new_url_to_firestore(full_url)
-                new_urls.append(full_url)
-        # new_urls = [urljoin(url, u) if url_is_relative(u) else u for u in res['links']]  # convert all new URLs to absolute URLs
-        # CLOUD_FIRESTORE: Check if u is visited in the firestore, if it is, then do not add it to the new_urls.
-        # CLOUD_FIRESTORE: (contd..) However, if it is not visited, make a new document and mark it as visited = False & crawled = False
+        new_urls = [urljoin(url, u) if url_is_relative(u) else u for u in res['links']]
+        
         new_urls = [u for u in new_urls 
                     if      u not in visited and u.startswith('http') 
                     and     (len(pos_regex)==0 or any([r.match(u) for r in pos_regex]))
                     and     (len(neg_regex)==0 or (not any([r.match(u) for r in neg_regex]))) 
                    ]
+        
+        filtered_urls = []
+        for full_url in new_urls:
+            if not is_url_visited_in_firestore(full_url):
+                add_new_url_to_firestore(full_url)
+                filtered_urls.append(full_url)
+        
+        new_urls = filtered_urls
         new_urls = list(set(new_urls))
         visited.update(new_urls)
 
