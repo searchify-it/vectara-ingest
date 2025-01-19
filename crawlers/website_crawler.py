@@ -110,9 +110,9 @@ class WebsiteCrawler(Crawler):
                 if inx % 100 == 0:
                     logging.info(f"Crawling URL number {inx+1} out of {len(urls)}")
 
-                # # CRAWL EDIT: Dont recrawl. Uncomment when rerunning. dont need the check for first time since nothing is crawled
-                # if is_url_crawled_in_firestore(url):
-                #     continue
+                # CRAWL EDIT: Dont recrawl. Uncomment when rerunning. dont need the check for first time since nothing is crawled
+                if is_url_crawled_in_firestore(url):
+                    continue
                 
                 crawl_worker.process(url, source=source) # TODO: Index with Filter attribute and analytic data
                 
