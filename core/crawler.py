@@ -22,6 +22,63 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
+
+def mark_url_in_firestore(url, visited=None, crawled=None):
+    """
+    Store the URL as a field instead of using it as the document ID.
+    Optional fields: visited and crawled.
+    """
+    timestamp = datetime.utcnow()  # Use UTC for consistency
+
+    doc_query = db.collection('urls').where('url', '==', url).limit(1).get()
+
+    if doc_query:
+        # Document exists: Update only the necessary fields
+        doc_ref = db.collection('urls').document(doc_query[0].id)
+        updates = {}
+        if visited is not None:
+            updates['visited'] = visited
+        if visited:
+            updates['visitedAt'] = timestamp
+        if crawled is not None:
+            updates['crawled'] = crawled
+        if crawled:
+            updates['crawledAt'] = timestamp
+        doc_ref.update(updates)
+    else:
+        # Document doesn't exist: Create it with all fields, including createdAt
+        db.collection('urls').add({
+            'url': url,
+            'visited': visited,
+            'crawled': crawled,
+            'createdAt': timestamp,
+            'visitedAt': timestamp if visited else None
+        })
+
+
+def is_url_visited_in_firestore(url):
+    doc_query = db.collection('urls').where(
+        'url', '==', url).limit(1).get()
+    if doc_query:
+        doc_ref = db.collection('urls').document(doc_query[0].id)
+        doc = doc_ref.get()
+        return doc.to_dict().get('visited', False)
+    return False
+
+
+def is_url_crawled_in_firestore(url):
+    doc_query = db.collection('urls').where(
+        'url', '==', url).limit(1).get()
+    if doc_query:
+        doc_ref = db.collection('urls').document(doc_query[0].id)
+        doc = doc_ref.get()
+        return doc.to_dict().get('crawled', False)
+    return False
+
+def add_new_url_to_firestore(url):
+    mark_url_in_firestore(url, visited=False, crawled=False)
+
+
 get_headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:98.0) Gecko/20100101 Firefox/98.0",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -30,16 +87,18 @@ get_headers = {
     "Connection": "keep-alive",
 }
 
+
 def url_is_relative(url: str) -> bool:
     parsed_url = urlparse(url)
     return not parsed_url.scheme and not parsed_url.netloc
 
-def recursive_crawl(url: str, depth: int, pos_regex: List[Any], neg_regex: List[Any], 
-                    indexer: Indexer, visited: Optional[Set[str]]=None, 
+
+def recursive_crawl(url: str, depth: int, pos_regex: List[Any], neg_regex: List[Any],
+                    indexer: Indexer, visited: Optional[Set[str]] = None,
                     verbose: bool = False) -> Set[str]:
     """
     Recursively crawl a URL and extract all links from it.
-    """    
+    """
     if visited is None:
         visited = set()
 
@@ -48,68 +107,37 @@ def recursive_crawl(url: str, depth: int, pos_regex: List[Any], neg_regex: List[
     if any([url_without_fragment.endswith(ext) for ext in (archive_extensions + img_extensions)]):
         return visited
 
-    def mark_url_in_firestore(url, visited, crawled):
-        """
-        Store the URL as a field instead of using it as the document ID.
-        """
-        timestamp = datetime.utcnow()  # Use UTC for consistency
-        doc_query = db.collection('urls').where('url', '==', url).limit(1).get()
+    # CRAWL EDIT: Return the url even if it is visited since we run crawl at depth 0
+    # # Race condition resolve
+    # if is_url_visited_in_firestore(url):
+    #     return visited
 
-        if doc_query:
-            # Document exists: Update only the necessary fields
-            doc_ref = db.collection('urls').document(doc_query[0].id)
-            updates = {'visited': visited, 'crawled': crawled}
-            if visited:
-                updates['visitedAt'] = timestamp
-            doc_ref.update(updates)
-        else:
-            # Document doesn't exist: Create it with all fields, including createdAt
-            db.collection('urls').add({
-                'url': url,
-                'visited': visited,
-                'crawled': crawled,
-                'createdAt': timestamp,
-                'visitedAt': timestamp if visited else None
-            })
-
-    def is_url_visited_in_firestore(url):
-        doc_query = db.collection('urls').where(
-            'url', '==', url).limit(1).get()
-        if doc_query:
-            doc_ref = db.collection('urls').document(doc_query[0].id)
-            doc = doc_ref.get()
-            return doc.to_dict().get('visited', False)
-        return False
-    
-    # Race condition resolve
-    if is_url_visited_in_firestore(url):
-        return visited
-
-    def add_new_url_to_firestore(url):
-        mark_url_in_firestore(url, visited=False, crawled=False)
-
-    mark_url_in_firestore(url, visited=True, crawled=False)
     visited.add(url)
+    # CRAWL EDIT. Return early for crawling since the links were probably retrieved already. "Probably" because it might not be visited
+    if depth <= 0:
+        return visited
+    mark_url_in_firestore(url, visited=True, crawled=False)
 
-    # for document files (like PPT, DOCX, etc) we don't extract links from the URL, but the link itself is included. 
+    # for document files (like PPT, DOCX, etc) we don't extract links from the URL, but the link itself is included.
     if any([url_without_fragment.endswith(ext) for ext in doc_extensions]):
         return visited
     try:
         res = indexer.fetch_page_contents(url)
-        new_urls = [urljoin(url, u) if url_is_relative(u) else u for u in res['links']]
-        
-        new_urls = [u for u in new_urls 
-                    if      u not in visited and u.startswith('http') 
-                    and     (len(pos_regex)==0 or any([r.match(u) for r in pos_regex]))
-                    and     (len(neg_regex)==0 or (not any([r.match(u) for r in neg_regex]))) 
-                   ]
-        
+        new_urls = [urljoin(url, u) if url_is_relative(u)
+                    else u for u in res['links']]
+
+        new_urls = [u for u in new_urls
+                    if u not in visited and u.startswith('http')
+                    and (len(pos_regex) == 0 or any([r.match(u) for r in pos_regex]))
+                    and (len(neg_regex) == 0 or (not any([r.match(u) for r in neg_regex])))
+                    ]
+
         filtered_urls = []
         for full_url in new_urls:
             if not is_url_visited_in_firestore(full_url):
                 add_new_url_to_firestore(full_url)
                 filtered_urls.append(full_url)
-        
+
         new_urls = filtered_urls
         new_urls = list(set(new_urls))
         visited.update(new_urls)
@@ -122,9 +150,10 @@ def recursive_crawl(url: str, depth: int, pos_regex: List[Any], neg_regex: List[
         # if we reached the maximum depth, stop and return the visited URLs
         if depth <= 0:
             return visited
-    
+
         for new_url in new_urls:
-            visited = recursive_crawl(new_url, depth-1, pos_regex, neg_regex, indexer, visited, verbose)
+            visited = recursive_crawl(
+                new_url, depth-1, pos_regex, neg_regex, indexer, visited, verbose)
     except Exception as e:
         mark_url_in_firestore(url, visited=False, crawled=False)
         logging.error(f"Error {e} in recursive_crawl for {url}")

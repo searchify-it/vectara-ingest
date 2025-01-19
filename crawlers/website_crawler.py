@@ -1,5 +1,5 @@
 import logging
-from core.crawler import Crawler, recursive_crawl
+from core.crawler import Crawler, recursive_crawl, mark_url_in_firestore, is_url_crawled_in_firestore
 from core.utils import clean_urls, archive_extensions, img_extensions, get_file_extension, RateLimiter, setup_logging, get_urls_from_sitemap
 from core.indexer import Indexer
 import re
@@ -19,7 +19,8 @@ class PageCrawlWorker(object):
         setup_logging()
 
     def process(self, url: str, source: str):
-        metadata = {"source": source, "url": url}
+        # CRAWL EDIT. update metadata for future indexing and so on. First class is base. Everyone belongs to base class
+        metadata = {"source": source, "url": url, "class_0": True, "class_1": False, "class_2": False, "class_3": False, "class_4": False}
         logging.info(f"Crawling and indexing {url}")
         try:
             with self.rate_limiter:
@@ -78,7 +79,9 @@ class WebsiteCrawler(Crawler):
         else:
             logging.info(f"Collected {len(urls)} URLs to crawl and index.")
 
-        exit()
+        # CRAWL EDIT. dont exit, actually crawl
+        # exit()
+
         # print some file types
         file_types = list(set([get_file_extension(u) for u in urls]))
         file_types = [t for t in file_types if t != ""]
@@ -106,7 +109,15 @@ class WebsiteCrawler(Crawler):
             for inx, url in enumerate(urls):
                 if inx % 100 == 0:
                     logging.info(f"Crawling URL number {inx+1} out of {len(urls)}")
-                crawl_worker.process(url, source=source)
+
+                # # CRAWL EDIT: Dont recrawl. Uncomment when rerunning. dont need the check for first time since nothing is crawled
+                # if is_url_crawled_in_firestore(url):
+                #     continue
+                
+                crawl_worker.process(url, source=source) # TODO: Index with Filter attribute and analytic data
+                
+                # CRAWL EDIT: update database
+                mark_url_in_firestore(url, visited=None, crawled=True)
 
         # If remove_old_content is set to true:
         # remove from corpus any document previously indexed that is NOT in the crawl list
