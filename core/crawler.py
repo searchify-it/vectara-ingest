@@ -66,6 +66,15 @@ def is_url_visited_in_firestore(url):
     return False
 
 
+def is_url_skipped_in_firestore(url):
+    doc_query = db.collection('urls').where(
+        'url', '==', url).limit(1).get()
+    if doc_query:
+        doc_ref = db.collection('urls').document(doc_query[0].id)
+        doc = doc_ref.get()
+        return doc.to_dict().get('skip', False)
+    return False
+
 def is_url_crawled_in_firestore(url):
     doc_query = db.collection('urls').where(
         'url', '==', url).limit(1).get()

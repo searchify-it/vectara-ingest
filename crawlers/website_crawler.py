@@ -1,5 +1,5 @@
 import logging
-from core.crawler import Crawler, recursive_crawl, mark_url_in_firestore, is_url_crawled_in_firestore
+from core.crawler import Crawler, recursive_crawl, mark_url_in_firestore, is_url_crawled_in_firestore, is_url_skipped_in_firestore
 from core.utils import clean_urls, archive_extensions, img_extensions, get_file_extension, RateLimiter, setup_logging, get_urls_from_sitemap
 from core.indexer import Indexer
 import re
@@ -111,7 +111,7 @@ class WebsiteCrawler(Crawler):
                     logging.info(f"Crawling URL number {inx+1} out of {len(urls)}")
 
                 # CRAWL EDIT: Dont recrawl. Uncomment when rerunning. dont need the check for first time since nothing is crawled
-                if is_url_crawled_in_firestore(url):
+                if is_url_crawled_in_firestore(url) or is_url_skipped_in_firestore(url):
                     continue
                 
                 crawl_worker.process(url, source=source) # TODO: Index with Filter attribute and analytic data
