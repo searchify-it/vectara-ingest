@@ -2,7 +2,9 @@ import os
 import re
 import sys
 import requests
-from typing import List, Set
+from requests.adapters import HTTPAdapter
+from requests.models import Response, PreparedRequest
+from typing import List, Set, Any, Dict
 
 from urllib3.util.retry import Retry
 from urllib.parse import urlparse, urlunparse, ParseResult, urljoin
@@ -11,6 +13,8 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
 from slugify import slugify
+
+import base64
 import magic
 
 import shutil
@@ -20,8 +24,10 @@ from io import StringIO
 import time
 import threading
 import logging
+import glob
 
 from langdetect import detect
+from omegaconf import DictConfig
 
 try:
     from presidio_analyzer import AnalyzerEngine
@@ -37,10 +43,14 @@ archive_extensions = [".zip", ".gz", ".tar", ".bz2", ".7z", ".rar"]
 binary_extensions = archive_extensions + img_extensions + doc_extensions
 
 def setup_logging():
+    log_level_str = os.getenv("LOGGING_LEVEL", "INFO").upper()
+
+    # Map string to logging level, fallback to INFO if invalid
+    log_level = getattr(logging, log_level_str, logging.INFO)
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(log_level)
     handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
+    handler.setLevel(log_level)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
     root.addHandler(handler)
@@ -105,6 +115,7 @@ def html_to_text(html: str, remove_code: bool = False, html_processing: dict = {
 
     # Remove code blocks if specified
     if remove_code:
+        logging.info("Removing code blocks from HTML")
         html = remove_code_from_html(html)
 
     # Initialize BeautifulSoup
@@ -141,6 +152,29 @@ def safe_remove_file(file_path: str):
     except Exception as e:
         logging.info(f"Failed to remove file: {file_path} due to {e}")
 
+
+class LoggingAdapter(HTTPAdapter):
+    def send(self, request: PreparedRequest, **kwargs) -> Response:
+        response = super().send(request, **kwargs)
+
+        log_message = f"""
+=== HTTP Request & Response ===
+> {request.method} {request.url}
+> Headers:
+{request.headers}
+> Body:
+{request.body if request.body else '<empty>'}
+
+< Status: {response.status_code}
+< Headers:
+{response.headers}
+< Body (truncated to 500 chars):
+{response.text[:500]}
+===============================
+"""
+        logging.debug(log_message)
+        return response
+
 def create_session_with_retries(retries: int = 5) -> requests.Session:
     """Create a requests session with retries."""
     session = requests.Session()
@@ -148,11 +182,68 @@ def create_session_with_retries(retries: int = 5) -> requests.Session:
         total=retries,
         status_forcelist=[429, 430, 443, 500, 502, 503, 504],  # A set of integer HTTP status codes that we should force a retry on.
         backoff_factor=1,
+        raise_on_status=False,
+        respect_retry_after_header=True,
+        allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
     )
-    adapter = requests.adapters.HTTPAdapter(max_retries=retry_strategy)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
+    logging_adapter = LoggingAdapter(max_retries=retry_strategy)
+    session.mount('http://', logging_adapter)
+    session.mount('https://', logging_adapter)
     return session
+
+def configure_session_for_ssl(session: requests.Session, config: DictConfig) -> None:
+    """
+    Configure SSL settings for a requests session.
+
+    This function updates the SSL verification settings of the provided `requests.Session`
+    based on the configuration provided. It allows disabling SSL verification for
+    debugging purposes or specifying a custom CA certificate.
+
+    Parameters:
+    -----------
+    session : requests.Session
+        The requests session to configure with SSL settings.
+
+    config : DictConfig
+        A dictionary-like object containing SSL-related configuration:
+        - "ssl_verify" (bool or str, optional):
+          - If `False`, SSL verification is disabled (not recommended for production).
+          - If a string, it is treated as the path to a custom CA certificate file or directory.
+          - If `True` or not provided, default SSL verification is used.
+    """
+    ssl_verify = config.get("ssl_verify", None)
+    
+    if ssl_verify is False or (isinstance(ssl_verify, str) and ssl_verify.lower() in ("false", "0")):
+        logging.warning("Disabling ssl verification for session.")
+        session.verify = False
+        return
+    
+    if ssl_verify is True or (isinstance(ssl_verify, str) and ssl_verify.lower() in ("true", "1")):
+        logging.debug("SSL verify using default system certificates")
+        return
+    
+    if isinstance(ssl_verify, str):
+        try:
+            # First try direct path (works in Docker and absolute paths)
+            if os.path.exists(ssl_verify):
+                logging.info(f"Using certificate path: {ssl_verify}")
+                session.verify = ssl_verify
+                return
+        except Exception as e:
+            logging.debug(f"Direct path check failed: {e}")
+        
+        try:
+            # Then try expanded path (works with ~)
+            ca_path = os.path.expanduser(ssl_verify)
+            if os.path.exists(ca_path):
+                logging.info(f"Using expanded certificate path: {ca_path}")
+                session.verify = ca_path
+                return
+        except Exception as e:
+            logging.debug(f"Expanded path check failed: {e}")
+            
+        # If we get here, neither path worked
+        raise FileNotFoundError(f"Certificate path '{ssl_verify}' could not be found or accessed.")
 
 def remove_anchor(url: str) -> str:
     """Remove the anchor from a URL."""
@@ -339,6 +430,10 @@ def df_cols_to_headers(df: pd.DataFrame):
         for col_tuple in columns:
             label_at_level = col_tuple[level]
             
+            # Replace NaN with an empty string
+            if pd.isna(label_at_level):
+                label_at_level = ""
+            
             if label_at_level == current_label:
                 # Same label → increase the colspan
                 current_colspan += 1
@@ -359,15 +454,220 @@ def df_cols_to_headers(df: pd.DataFrame):
 
     return rows
 
+def get_file_path_from_url(url):
+    path = urlparse(url).path
+    # Get the file name (last segment of path)
+    filename = os.path.basename(path)
+    # Strip off any trailing query string if present
+    filename = filename.split("?")[0]
+    
+    # Split into name + extension
+    name_part, ext = os.path.splitext(filename)
+    
+    # Slugify the name part only
+    slugified_name = slugify(name_part)
+    
+    # Construct new filename
+    new_filename = f"{slugified_name}{ext}"
+    return new_filename
+
 def markdown_to_df(markdown_table):
-    # Create a file-like object from the markdown table string
     table_io = StringIO(markdown_table.strip())
-    df = pd.read_csv(table_io, sep='|', skipinitialspace=True)
+    lines = table_io.readlines()
     
-    # Clean up the DataFrame
-    df = df.dropna(axis=1, how='all')   # Remove empty columns
-    df = df.iloc[1:]                    # Remove the row with dashes (separator row)
-    df.columns = df.columns.str.strip() # Remove whitespace from column names
-    df = df.reset_index(drop=True)      # Reset the index
+    if not lines:
+        return pd.DataFrame()
     
-    return df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+    # Read header and clean it
+    header = [col.strip() for col in lines[0].strip().split('|')]
+    # Remove empty strings at start/end if present
+    header = [col for col in header if col]
+    
+    # Check if the second row is a separator row
+    if len(lines) > 1 and all(col.strip('- ') == '' for col in lines[1].strip().split('|') if col):
+        data_lines = lines[2:]
+    else:
+        data_lines = lines[1:]
+    
+    # Parse data rows
+    rows = []
+    for line in data_lines:
+        # Split and clean each row
+        row = [cell.strip() for cell in line.strip().split('|')]
+        # Remove empty strings at start/end if present
+        row = [cell for cell in row if cell]
+        rows.append(row)
+    
+    if not rows:
+        return pd.DataFrame(columns=header)
+    
+    # Find the maximum number of columns
+    max_cols = max(len(header), max(len(row) for row in rows))
+    
+    # Extend header if necessary
+    if len(header) < max_cols:
+        header.extend([f'Column_{i+1}' for i in range(len(header), max_cols)])
+    
+    # Extend rows if necessary
+    cleaned_rows = [row + [''] * (max_cols - len(row)) for row in rows]
+    
+    # Create DataFrame
+    df = pd.DataFrame(cleaned_rows, columns=header[:max_cols])
+    return df
+
+def create_row_items(items: List[Any]) -> List[Dict[str, Any]]:
+    res = []
+    for item in items:
+        if isinstance(item, tuple):   # Tuple of (colname, colspan)
+            val = '' if pd.isnull(item[0]) else item[0]
+            extra_colspan = item[1] - 1
+            res.extend([{'text_value': val}] + [{'text_value':''} for _ in range(extra_colspan)])
+        elif isinstance(item, str) or isinstance(item, int) or isinstance(item, float) or isinstance(item, bool):
+            res.append({'text_value': str(item)})
+        else:
+            logging.info(f"Create_row_items: unsupported type {type(item)} for item {item}")
+    return res
+
+def _expand_table(table_tag):
+    """
+    Return a list of rows (list of strings), expanding any rowspan/colspan.
+    """
+    rows_data = []
+    # Occupied map tracks which (row, col) positions are already filled
+    occupied = {}
+
+    # Gather all <tr>
+    all_tr = table_tag.find_all('tr')
+    
+    for row_idx, tr in enumerate(all_tr):
+        # Ensure we have a sublist for this row
+        if len(rows_data) <= row_idx:
+            rows_data.append([])
+        
+        # Current column position
+        col_idx = 0
+        
+        # Move over any positions occupied by row-spans from previous rows
+        while (row_idx, col_idx) in occupied:
+            col_idx += 1
+
+        cells = tr.find_all(['td','th'])
+        for cell in cells:
+            # Skip forward if the current position is occupied
+            while (row_idx, col_idx) in occupied:
+                col_idx += 1
+            
+            rowspan = int(cell.get('rowspan', 1))
+            colspan = int(cell.get('colspan', 1))
+            text = cell.get_text(strip=True)
+            
+            # Expand rows_data if needed
+            while len(rows_data[row_idx]) < col_idx:
+                rows_data[row_idx].append('')
+            # Make sure the current row has enough columns
+            while len(rows_data[row_idx]) < col_idx + colspan:
+                rows_data[row_idx].append('')
+            
+            # Place text in all spanned columns of the current row
+            for c in range(colspan):
+                rows_data[row_idx][col_idx + c] = text
+            
+            # If there's a rowspan > 1, mark those positions as occupied
+            # so we duplicate the text in subsequent rows
+            for r in range(1, rowspan):
+                rpos = row_idx + r
+                # Ensure rows_data has enough rows
+                while len(rows_data) <= rpos:
+                    rows_data.append([])
+                for c in range(colspan):
+                    # Expand that row's columns if needed
+                    while len(rows_data[rpos]) < col_idx + c:
+                        rows_data[rpos].append('')
+                    rows_data[rpos].append('')
+                    # Mark the future cell as occupied with the same text
+                    occupied[(rpos, col_idx + c)] = text
+            
+            col_idx += colspan
+    
+    # Normalize all rows to the same length
+    max_cols = max(len(r) for r in rows_data) if rows_data else 0
+    for r in rows_data:
+        while len(r) < max_cols:
+            r.append('')
+    return rows_data
+
+def html_table_to_header_and_rows(html):
+    """
+    Parse the FIRST <table> from 'html' into a header row + data rows.
+    All 'rowspan'/'colspan' cells are expanded (duplicated) so each row
+    in the final output has the same number of columns.
+    
+    Returns:
+      (header, rows)
+    where
+      header: list of cell texts for the first row
+      rows: list of lists of cell texts for subsequent rows
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    table = soup.find('table')
+    if not table:
+        return [], []
+
+    # Expand into a full 2D list of rows
+    matrix = _expand_table(table)
+    if not matrix:
+        return [], []
+    
+    # First row is the "header"
+    header = matrix[0]
+    rows = matrix[1:]
+
+    return header, rows
+
+def get_media_type_from_base64(base64_data: str) -> str:
+    file_bytes = base64.b64decode(base64_data)
+    media_type = magic.Magic(mime=True).from_buffer(file_bytes)    
+    return media_type
+
+
+def get_docker_or_local_path(docker_path: str, output_dir: str = "vectara_ingest_output", should_delete_existing: bool = False, config_path: str = None) -> str:
+    """
+    Get appropriate path for storing files or reading data.
+    
+    Args:
+        docker_path: Legacy parameter, kept for backwards compatibility
+        output_dir: Output directory name for local path (can include subdirectories). Defaults to "vectara_ingest_output".
+        should_delete_existing: Whether to delete existing directory if it exists
+        config_path: Optional config path to try if docker path not found
+        
+    Returns:
+        str: The resolved path (Docker, config, or local)
+        
+    Raises:
+        FileNotFoundError: If config_path is provided but doesn't exist
+    """
+    # Try Docker path first
+    if os.path.exists(docker_path):
+        logging.info(f"Using Docker path: {docker_path}")
+        return docker_path
+        
+    # Try config path if provided
+    if config_path:
+        if os.path.exists(config_path):
+            logging.info(f"Using config path: {config_path}")
+            return config_path
+        else:
+            raise FileNotFoundError(f"Config path '{config_path}' was specified but could not be found.")
+        
+    # Fall back to local path
+    local_path = os.path.join(os.getcwd(), output_dir)
+    
+    # Delete existing directory if requested
+    if should_delete_existing and os.path.exists(local_path):
+        shutil.rmtree(local_path)
+            
+    # Create directory (and parent directories) if it doesn't exist
+    os.makedirs(local_path, exist_ok=True)
+            
+    logging.info(f"Using local path: {local_path}")
+    return local_path

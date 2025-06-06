@@ -1,14 +1,29 @@
 from typing import Set
+import os
 import json
 import base64
 import logging
+from omegaconf import OmegaConf
 
 from PIL import Image
 from io import BytesIO
+import cairosvg
 
 from core.models import generate, generate_image_summary
 
-def get_attributes_from_text(text: str, metadata_questions: list[dict], model_name: str, model_api_key: str) -> Set[str]:
+def _get_image_shape(content: str) -> tuple:
+    """
+    Given a base64-encoded image content string, return the image shape as (width, height).
+    """
+    try:
+        img_data = base64.b64decode(content)
+        img = Image.open(BytesIO(img_data))
+        return img.size  # (width, height)
+    except (IOError, OSError, ValueError) as e:
+        logging.info(f"Skipping summarization: not a valid image ({e})")
+        return None
+
+def get_attributes_from_text(cfg: OmegaConf, text: str, metadata_questions: list[dict], model_config: dict) -> Set[str]:
     """
     Given a text string, ask GPT-4o to answer a set of questions from the text
     Returns a dictionary of question/answer pairs.
@@ -21,31 +36,49 @@ def get_attributes_from_text(text: str, metadata_questions: list[dict], model_na
     for attr,question in metadata_questions.items():
         prompt += f"- {attr}: {question}\n"
     prompt += "Your task is retrieve the value of each attribute by answering the provided question, based on the text."
+    prompt += "Your response should be as concise and accurate as possible. Prioritize 1-2 word responses."
     prompt += "Your response should be as a dictionary of attribute/value pairs in JSON format, and include only the JSON output without any additional text."
-    res = generate(system_prompt, prompt, model_name, model_api_key)
+    logging.info(f"get_attributes_from_text() - Calling generate")
+    res = generate(cfg, system_prompt, prompt, model_config)
     if res.strip().startswith("```json"):
         res = res.strip().removeprefix("```json").removesuffix("```")
     return json.loads(res)
 
-def get_image_shape(content: str) -> tuple:
-    """
-    Given a base64-encoded image content string, return the image shape as (width, height).
-    """
-    img_data = base64.b64decode(content)
-    img = Image.open(BytesIO(img_data))
-    return img.size  # (width, height)
-
 class ImageSummarizer():
-    def __init__(self, model_name: str, model_api_key: str):
-        self.model_name = model_name
-        self.model_api_key = model_api_key
+    def __init__(self, cfg: OmegaConf, image_model_config: dict):
+        self.image_model_config = image_model_config
+        self.cfg = cfg
 
-    def summarize_image(self, image_path: str, image_url: str, previous_text: str = None):
+    def get_image_content_for_summarization(self, image_path: str):
+        
+        orig_image_path = image_path
+        if orig_image_path.lower().endswith(".svg"):
+            logging.info(f"Converting svg image ({image_path}) to png for summarization")
+            new_image_path = image_path.replace(".svg", ".png")
+            cairosvg.svg2png(url=image_path, write_to=new_image_path, dpi=300)
+            image_path = new_image_path
+
         content = None
         with open(image_path, "rb") as f:
             content = base64.b64encode(f.read()).decode("utf-8")
-        
-        width, height = get_image_shape(content)
+
+        if orig_image_path.lower().endswith(".svg"):
+            try:
+                os.remove(orig_image_path)
+            except FileNotFoundError:
+                logging.warning(f"File '{orig_image_path}' not found.")
+            except Exception as e:
+                logging.warning(f"An error occurred: {e}")
+
+        return content
+
+    def summarize_image(self, image_path: str, image_url: str, previous_text: str = None):
+        content = self.get_image_content_for_summarization(image_path)        
+        shape = _get_image_shape(content)
+        if not shape:
+             logging.info(f"Image too small to summarize ({image_url})")
+             return None
+        width, height = shape
         if width<10 or height<10:
             logging.info(f"Image too small to summarize ({image_url})")
             return None
@@ -65,48 +98,31 @@ class ImageSummarizer():
         if previous_text:
             prompt += f"The image came immediately following this text: '{previous_text}'"
         try:
-            summary = generate_image_summary(prompt, content, self.model_name, self.model_api_key)
+            summary = generate_image_summary(self.cfg, prompt, content, self.image_model_config)
             return summary
         except Exception as e:
             logging.info(f"Failed to summarize image ({image_url}): {e}")
             return ""
 
 class TableSummarizer():
-    def __init__(self, model_name: str, model_api_key: str):
-        self.model_name = model_name
-        self.model_api_key = model_api_key
+    def __init__(self, cfg: OmegaConf, table_model_config: dict):
+        self.table_model_config = table_model_config
+        self.cfg = cfg
 
     def summarize_table_text(self, text: str):
         prompt = f"""
-            Adopt the perspective of a professional data analyst, with expertise in generating insight from structured data. 
-            Provide a detailed description of the results reported in this table, ensuring clarity, depth and relevance. Don't omit any data points.
-            Start with a description for each each row in the table and its values. 
-            Then follow by a broader analysis of trends and insights, and conclude with an interpretation of the data.
-            Contextual Details:
-            - Examine the table headings, footnotes, or accompanying text to identify key contextual details such as the time period, location, subject area, and units of measurement.
-            - Always include the table title, time frame, and geographical or thematic scope in your description.
-            - If context is missing, acknowledge this explicitly and provide plausible assumptions where appropriate.
-            Data Analysis:
-            - Describe each data point or category individually if values are listed for different categories or time periods.
-            - Highlight key metrics, trends, and patterns evident in the data.
-            - Provide numerical evidence for any insights (e.g., "Revenue grew from $X in 2019 to $Y in 2022, representing a Z% increase over three years").
-            Trends and Insights:
-            - Analyze relationships between variables or categories (e.g., correlations, contrasts).
-            - Include comparisons across time periods, groups, or locations, as supported by the data.
-            - Identify and discuss patterns, outliers, and significant changes or consistencies, specifying the relevant data points.
-            Interpretation and Implications:
-            - Discuss the broader implications of observed trends and patterns.
-            - If the table represents a time series, emphasize changes over time and provide context for those changes (e.g., market trends, economic conditions).
-            - If the table shows categorical comparisons, focus on key differences or similarities between groups.
-            Clarity and Accuracy:
-            - Use clear and professional language, ensuring all descriptions are tied explicitly to the data.
-            - If uncertainties exist in the data or context, state them and clarify how they might impact the analysis.
-            Your response should be without headings, and in text (not markdown). 
-            Table chunk: {text} 
+            Adopt the perspective of a data analyst.
+            Summarize the key results reported in this table (in markdown format) without omitting critical details.
+            Make sure your summary is concise, informative and comprehensive.
+            Use clear and professional language, ensuring all descriptions are tied explicitly to the data.
+            Your response should be without headings, and in text (not markdown).
+            Your response should include contextual information, so that it is identified as relevant in search results.
+            Review your response for accuracy, coherence, and no hallucinations.
+            Here is the table: {text}
         """
         try:
-            system_prompt = "You are a helpful assistant tasked with summarizing data tables."
-            summary = generate(system_prompt, prompt, self.model_name, self.model_api_key)
+            system_prompt = "You are a helpful assistant tasked with summarizing data tables. Each table is represented in markdown format."
+            summary = generate(self.cfg, system_prompt, prompt, self.table_model_config)
             return summary
         except Exception as e:
             import traceback

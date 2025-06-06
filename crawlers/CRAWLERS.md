@@ -24,7 +24,8 @@ website_crawler:
     neg_regex: []
     num_per_second: 10
     pages_source: crawl
-    max_depth: 3      # only needed if pages_source is set to 'crawl'
+    crawl_method: internal  # "internal" (default) or "scrapy"
+    max_depth: 3            # only needed if pages_source is set to 'crawl'
     html_processing:
       ids_to_remove: [td-123]
       tags_to_remove: [nav]
@@ -58,6 +59,7 @@ The `html_processing` configuration defines a set of special instructions that c
 
 `ray_workers`, if defined, specifies the number of ray workers to use for parallel processing. ray_workers=0 means dont use Ray. ray_workers=-1 means use all cores available.
 Note that ray with docker does not work on Mac M1/M2 machines.
+
 
 ### Database crawler
 
@@ -200,7 +202,7 @@ The hackernews crawler can be used to crawl stories and comments from hacker new
 - `max_articles` specifies a limit to the number of stories crawled. 
 - `days_past` specifies the number of days backward to crawl, based on the top, new, ask, show and best story lists. For example with a value of 3 as in this example, the crawler will only index stories if the story or any comment in the story was published or updated in the last 3 days.
 - `days_past_comprehensive` if true, then the crawler performs a comprehensive search for ALL stories published within the last `days_past` days (which takes longer to run)
-
+- `ssl_verify`  If `False`, SSL verification is disabled (not recommended for production). If a string, it is treated as the path to a custom CA certificate file. If `True` or not provided, default SSL verification is used.
 ### Docs crawler
 
 ```yaml
@@ -212,6 +214,7 @@ The hackernews crawler can be used to crawl stories and comments from hacker new
     num_per_second: 10
     extensions_to_ignore: [".php", ".java", ".py", ".js"]
     docs_system: docusaurus
+    crawl_method: internal  # "internal" (default) or "scrapy"
     remove_code: true
     html_processing:
       ids_to_remove: []
@@ -237,7 +240,9 @@ If `crawl_report` is true then the list of URLs associated with the removed docu
 The `html_processing` configuration defines a set of special instructions that can be used to ignore some content when extracting text from HTML:
 - `ids_to_remove` defines an (optional) list of HTML IDs that are ignored when extracting text from the page.
 - `tags_to_remove` defines an (optional) list of HTML semantic tags (like header, footer, nav, etc) that are ignored when extracting text from the page.
-
+- `classes_to_remove` defines an (optional) list of CSS class names that are ignored when extracting text from the page.
+- `ssl_verify`  If `False`, SSL verification is disabled (not recommended for production). If a string, it is treated as the path to a custom CA certificate file. If `True` or not provided, default SSL verification is used.
+- 
 <br>**Note**: when specifying regular expressions it's recommended to use single quotes (as opposed to double quotes) to avoid issues with escape characters.
 
 ### Discourse crawler
@@ -302,6 +307,21 @@ The JIRA crawler indexes issues and comments into Vectara.
 - `jira_base_url`: the Jira base_url
 - `jira_username`: the user name that the crawler should use (`JIRA_PASSWORD` should be separately defined in the `secrets.toml` file)
 - `jira_jql`: a Jira JQL condition on the issues identified; in this example it is configured to only include items from the last year.
+- `ssl_verify`  If `False`, SSL verification is disabled (not recommended for production). If a string, it is treated as the path to a custom CA certificate file. If `True` or not provided, default SSL verification is used.
+- 
+### Confluence crawler
+
+```yaml
+  confluence_crawler:
+    confluence_base_url: "https://vectara.atlassian.net/wiki"
+    confluence_cql: 'space = Test and LastModified > now("-365d") and type IN (blogpost, page)'
+    confluence_include_attachments: true
+```
+
+This Python crawler is designed to pull content from a Confluence instance and index it into Vectara. It queries Confluence using a [CQL query](https://developer.atlassian.com/cloud/confluence/advanced-searching-using-cql/), 
+retrieves pages and blogposts (including attachments if configured), extracts relevant metadata (e.g., labels, authors, space information).  
+
+- `ssl_verify`  If `False`, SSL verification is disabled (not recommended for production). If a string, it is treated as the path to a custom CA certificate file. If `True` or not provided, default SSL verification is used.
 
 ### Twitter crawler
 
@@ -355,6 +375,8 @@ The crawler leverages [Presidio Analyzer and Anonymizer](https://microsoft.githu
     delegated_users:
       - ofer@vectara.com
       - jana@vectara.com
+    credentials_file: /path/to/credential.json # In CLI version make sure that path points to credetianls.json
+
 ```
 
 The gdrive crawler indexes content of your Google Drive folder
@@ -439,6 +461,64 @@ To use the slack crawler you need to create slack bot app and give it permission
 
 - Place the generated user token in `secrets.toml`.
   - `SLACK_USER_TOKEN= <user_token>`
+
+### ServiceNow Crawler
+
+```yaml
+servicenow_crawler:
+  servicenow_instance_url: "https://dev189594.service-now.com/"
+  servicenow_process_attachments: true
+```
+
+This crawler indexes articles (and optional file attachments) from a ServiceNow Knowledge Base into [Vectara](https://vectara.com). It uses 
+the [ServiceNow Table API](https://developer.servicenow.com/dev.do#!/reference/api/rome/rest/c_TableAPI) to fetch data from the `kb_knowledge` 
+table in batches and then sends each article's content to Vectara for indexing. If enabled, it will also retrieve attachments via ServiceNow's 
+attachment API and index them in Vectara as well.
+
+- `servicenow_instance_url`: The base URL of the ServiceNow instance (e.g., "https://dev12345.service-now.com/").
+- `servicenow_process_attachments`: Boolean flag indicating whether to retrieve and index file attachments in addition to the article content.
+- `servicenow_batch_size` (if present): The number of articles to fetch in each API call. Default: 100.
+- `servicenow_table` (if present):The ServiceNow table to query for articles. Default: `"kb_knowledge"`.
+- `servicenow_query` (if present): A query (e.g., `sysparm_query`) for filtering the knowledge-base articles returned by the ServiceNow API.
+- `ssl_verify`  If `False`, SSL verification is disabled (not recommended for production). If a string, it is treated as the path to a custom CA certificate file. If `True` or not provided, default SSL verification is used.
+
+- **[Table API Reference](https://developer.servicenow.com/dev.do#!/reference/api/rome/rest/c_TableAPI)**  
+  Contains details on the various endpoints, query parameters, and usage examples for retrieving data from ServiceNow tables.
+- **[Attachment API Reference](https://developer.servicenow.com/dev.do#!/reference/api/rome/rest/c_AttachmentAPI)**  
+  Covers how to list and download attachments from ServiceNow records.
+
+### Sharepoint Crawler
+
+```yaml
+sharepoint_crawler:
+  team_site_url: "https://yoursharepointdomain.sharepoint.com/sites/YourTeamSite"
+  target_folder: "Shared Documents/TargetFolder"
+  recursive: true
+  mode: "folder" # Currently supports 'folder' mode only.
+  auth_type: "user_credentials" # Options: 'user_credentials', 'client_credentials', 'client_certificate'
+  username: "your.username@example.com"
+  password: "your_password"
+  client_id: "<your_client_id>"
+  client_secret: "<your_client_secret>"
+  tenant_id: "<your_tenant_id>"
+  cert_thumbprint: "<certificate_thumbprint>"
+  cert_path: "/path/to/certificate.pem"
+  cert_passphrase: "<certificate_passphrase>" # optional
+```
+
+This Python crawler ingests documents from a SharePoint site and indexes them into Vectara. It authenticates to SharePoint using either user credentials, client credentials, or a client certificate. The crawler recursively scans folders, downloads supported file types (.pdf, .md, .odt, .doc, .docx, .ppt, .pptx, .txt, .html, .htm, .lxml, .rtf, .epub), and submits these files for indexing along with associated metadata.
+-	`team_site_url`: The URL of your SharePoint site.
+-	`target_folder`: The path to the SharePoint folder you wish to crawl.
+-	`recursive`: Set to true if subfolders should be crawled recursively.
+-	`mode`: Determines crawling behavior; currently supports "folder" only.
+-	`auth_type`: Authentication method for SharePoint (user_credentials, client_credentials, or client_certificate).
+-	For user_credentials: provide username and password.
+-	For client_credentials: provide client_id, client_secret.
+-	For client_certificate: provide client_id, tenant_id, cert_thumbprint, cert_path, and optionally cert_passphrase.
+
+Ensure that sensitive information such as credentials and certificates are stored securely, and avoid disabling SSL verification in production environments.
+
+
 
 ## Other crawlers:
 

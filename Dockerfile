@@ -1,6 +1,14 @@
 # Stage 1: Build stage
 FROM python:3.11-slim AS builder
 
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+
+ENV http_proxy=$HTTP_PROXY
+ENV https_proxy=$HTTPS_PROXY
+ENV no_proxy=$NO_PROXY
+
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/vectara \
     XDG_RUNTIME_DIR=/tmp \
@@ -22,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR ${HOME}
 COPY requirements.txt requirements-extra.txt $HOME/
 
-RUN pip install --no-cache-dir uv==0.5.12
+RUN pip install --no-cache-dir uv==0.6.14
 RUN uv pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cpu \
     && uv pip install --no-cache-dir -r requirements.txt
 
@@ -75,12 +83,22 @@ RUN playwright install --with-deps firefox \
 # Set working directory
 WORKDIR ${HOME}
 
+COPY docker/bin/download-easyocr-models.py /bin/
+
+ARG DOWNLOAD_EASYOCR_MODELS=false
+
+RUN if [ "$DOWNLOAD_EASYOCR_MODELS" = "true" ]; then \
+            python3 /bin/download-easyocr-models.py 1>&2; \
+    fi
+
+
 # Copy application code
 COPY *.py $HOME/
 COPY core/*.py $HOME/core/
 COPY crawlers/ $HOME/crawlers/
 
+COPY docker/bin/docker-entrypoint.sh /bin/docker-entrypoint.sh
+RUN chmod +x /bin/docker-entrypoint.sh
 
-# Set entrypoint and command
-ENTRYPOINT ["/bin/bash", "-l", "-c"]
-CMD ["python3 ingest.py $CONFIG $PROFILE"]
+# Use the script as the entrypoint
+ENTRYPOINT ["/bin/docker-entrypoint.sh"]

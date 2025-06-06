@@ -29,6 +29,15 @@ Vectara is the trusted GenAI platform providing simple [APIs](https://docs.vecta
 For more information about this repository, see [Code Organization](#code-organization) and [Crawling](#crawling).
 
 # Getting Started Guide
+
+vectara-ingest can be used in multiple ways:
+
+1. **Docker container** - The instructions below show how to run vectara-ingest in a Docker container
+2. **Command-line interface (CLI)** - vectara-ingest can be installed as a CLI tool using conda
+3. **Python package** - vectara-ingest can be imported and used in your Python applications
+
+For details on using vectara-ingest as a conda package or importing it in your code, please refer to the [conda/README.md](conda/README.md) file.
+
 This guide explains how to create a basic crawler to scrape content from [Paul Graham's website](http://www.paulgraham.com/index.html), and ingest it into Vectara.
 
 ## Prerequisites
@@ -98,6 +107,14 @@ For our example we would index the content of https://www.paulgraham.com website
       
    4. Change `rss_crawler.days_past` to `365`.
 
+6. If Vectara is installed in your datacenter, and you are using an internal certificate authority:
+   1. Write the entire certificate chain to `ca.pem` in the main `vectara-ingest` folder.
+   2. Update your crawler config to include the following.
+      ```yaml
+      vectara:
+         ssl_verify: /home/vectara/env/ca.pem
+      ```
+
 ## Step 3: Run the crawler
 
 1. Ensure that Docker is running on your local machine.
@@ -112,14 +129,14 @@ For our example we would index the content of https://www.paulgraham.com website
    * On Linux, ensure that the `run.sh` file is executable by running the following command:
   
      ```bash
-     cmhod +x run.sh
+     chmod +x run.sh
      ```
 
    * On Windows, ensure that you run this command from within the WSL 2 environment.
 
    **Note:** To protect your system's resources and make it easier to move your crawlers to the cloud, the crawler executes inside a Docker container. This is a lengthy process because in involves numerous dependencies
 
-1. When the container is set up, you can track your crawler’s progress:
+1. When the container is set up, you can track your crawler's progress:
 
    ```bash
    docker logs -f vingest
@@ -166,9 +183,25 @@ Each configuration YAML file includes a set of standard variables, for example:
 
 ```yaml
 vectara:
+  # endpoint for Vectara platform
+  endpoint: api.vectara.io
+
+  # authentication URL for OAuth (when using create_corpus)
+  auth_url: auth.vectara.io
+
+  # Define SSL verification for Vectara Platform
+  # If `False`, SSL verification is disabled (not recommended for production). 
+  # If a string, it is treated as the path to a custom CA certificate file. 
+  # If `True` or not provided, default SSL verification is used.
+  ssl_verify: True
+
   # the corpus key for indexing
   corpus_key: my-corpus
   
+  # Chunking strategy
+  chunking_strategy: sentence   # sentence or fixed
+  chunk_size: 512               # only applies for "fixed" strategy
+
   # flag: should vectara-ingest reindex if document already exists (optional)
   reindex: false
 
@@ -177,9 +210,15 @@ vectara:
   create_corpus: false
   
   # flag: store a copy of all crawled data that is indexed into a local folder
+  # If enabled, data will be stored in this folder "~/tmp/mount/indexed_docs_XXX" in your local machine,
+  # where XXX is a unique ID.
   store_docs: false
   
-  # timeout: sets the URL crawling timeout in seconds (optional)
+  # Directory path where vectara-ingest will store all output files, including reports, temporary files, credentials, and other artifacts. When running locally, this path is relative to the current working directory. When running in Docker, files are inside the container at `/home/vectara/env/`. Default value is `vectara_ingest_output`.
+  output_dir: vectara_ingest_output
+
+  # timeout: sets the URL crawling timeout in seconds (optional; defaults to 90)
+  # this applies to crawling web pages.
   timeout: 90
 
   # post_load_timeout: sets additional timeout past full page load to wait for animations and AJAX
@@ -204,29 +243,62 @@ vectara:
   # Which whisper model to use for audio files (relevant for YT, S3 and folder crawlers)
   # Valid values: tiny, base, small, medium or large. Defaults to base.
   whisper_model: the model name for whisper
+  # Whether the session should trust the environment settings. When set to False SSL will not be verified. Do not use in production.
 
 
 doc_processing:
 
-  # which model to use for table summary, image summary or contextual retrevial
-  # Options are "openai" or "anthropic". default is "openai"
-  model: openai
+  # which model to use for text processing (table summary, contextual chunking or data extraction), and for image processing.
+  # - provider can be "openai" or "anthropic" or "private". default is "openai"
+  # - base_url is an optional URL pointing to a privately-hosted URL for model serving
+  #   1) If you host the private endpoint locally (on your laptop), note that you would need to provide access 
+  #      to it from within the Docker image. For example: "http://host.docker.internal:5000/v1"
+  #   2) If your private API requires an api_key (recommended) then include PRIVATE_API_KEY in your secrets.toml
+  #      file under the `general` profile (same place you would include your `OPENAI_API_KEY`)
+  # - model_name is the model name to use for each type of processing (table, vision or contextual)
+  #
+  # For backwards compatibility, if you specify the "model" argument, then the same
+  # model is assumed for both text and vision processing, and model_name is also respected, 
+  # ignoring anything else in model_config.
+  #
+  model: openai         # can be openai, or anthropic.
+  model_name: 'gpt-4o'
 
-  # Whether or not to summarize table content with GPT-4o (inside PDF, HTML, PPT, DOCX; optional)
-  # When using this feature, you need to list the OPENAI_API_KEY or ANTHROPIC_API_KEY in your `secrets.toml` 
-  # under a special profile called `general`.
+  model_config:
+    text:
+      provider: openai
+      base_url: https://api.openai.com/v1
+      model_name: "gpt-4o"
+    vision:
+      provider: private
+      base_url: https://vllm.mycompany.com/
+      model_name: "llama3.3-70B"
+
+  # which document parser to use for local file parsing: unstructured, llama_parse, docupanda or docling
+  # If using llama_parse, you need to add LLAMA_CLOUD_API_KEY in your `secrets.toml` file.
+  # If using docupanda, you need to add DOCUPANDA_API_KEY in your `secrets.toml` file
+  doc_parser: docling
+
+  # Whether or not to parse tables from documents and ingest into Vectara.
+  # When enabled this feature applies to PDF, HTML, PPT, DOCX files and requires setting 
+  # the OPENAI_API_KEY or ANTHROPIC_API_KEY in your `secrets.toml` under a special profile called `general`.
+  # Tables extracted will be ingested into Vectara along with a summary generated by the LLM
   # This processing might be slow and will require you to have an additional paid subscription to OpenAI or ANTHROPIC. 
+  # Table parsing will be performed by the doc_parser, unless `enable_gmft` is enabled (only for PDF files).
   # See [here](TABLE_SUMMARY.md) for some examples of how table summary works.
-  summarize_tables: false
-  
+  parse_tables: false
+
+  # use GMFT to parse tables from PDF
+  enable_gmft: true
+
+  # use OCR when parsing documents (Docling only)
+  do_ocr: true
+
   # Whether or not to summarize image content using GPT-4o vision 
   # When using this feature, you need to list the OPENAI_API_KEY or ANTHRPIC_API_KEY in your `secrets.toml` 
   # under a special profile called `general`.
   # This processing might be slow and will require you to have an additional paid subscription to OpenAI or ANTHROPIC. 
   summarize_images: false
-
-  # which document parser to use for local file parsing: unstructured or docling
-  doc_parser: docling
 
   # Unstructured document parsing configuration
   unstructured_config:
@@ -235,7 +307,8 @@ doc_processing:
 
   # Docling document parsing configuation
   docling_config:
-    chunk: true                            # Whether to use Docling Hybrid chunking
+    chunking_strategy: hybrid          # chunking strategy to use: hierarchical, hybrid or none (default hybrid)
+    image_scale: 1.0                   # set to 2.0 for larger resolution in diagrams. 1.0 is equivalent to 72 DPI
 
   # whether to use core_indexing which maintains the chunks from unstructured or docling, or let vectara chunk further
   use_core_indexing: false            
@@ -243,8 +316,8 @@ doc_processing:
   # enable contextual chunking (only for PDF files at the moment)
   contextual_chunking: false            
 
-# defines a set of optional metadata attributes, each with a "query" to extract that value
-# requires OPENAI_API_KEY or ANTHROPIC_API_KEY to be defined.
+  # defines a set of optional metadata attributes, each with a "query" to extract that value
+  # requires OPENAI_API_KEY or ANTHROPIC_API_KEY to be defined.
   extract_metadata:
     'num_pages': 'number of pages in this document'
     'date': 'date of this document'
@@ -253,6 +326,17 @@ doc_processing:
 crawling:
   # type of crawler; valid options are website, docusaurus, notion, jira, rss, mediawiki, discourse, github and others (this continues to evolve as new crawler types are added)
   crawler_type: XXX
+
+
+# This section can be added to your job configuration to allow tagging of metadata statically.
+# Each document created in the corpus will have the document metadata merged with the metadata here.
+# If a crawler adds metadata that conflicts with this metadata, the crawler metadata will be used.
+metadata:
+   project: foo
+   groups:
+     - group1
+     - group2
+     - group3
 ```
 
 Following that, where needed, the same YAML configuration file will a include crawler-specific section with crawler-specific parameters (see [about crawlers](crawlers/CRAWLERS.md)):
@@ -270,6 +354,7 @@ We use a `secrets.toml` file to hold secret keys and parameters. You need to cre
 [general]
 OPENAI_API_KEY="sk-..."
 ANTHROPIC_API_KEY="sk-..."
+PRIVATE_API_KEY="YOUR-PRIVATE-API_KEY"
 
 [profile1]
 api_key="<VECTAR-API-KEY-1>"
@@ -289,6 +374,15 @@ Many of the crawlers have their own secrets, for example Notion, Discourse, Jira
 If you are using the table summarization, image summarization or contextual retreival features, 
 you have to provide your own LLM key (either OPENAI_API_KEY or ANTHROPIC_API_KEY). 
 In this case, you would need to put that key under the `[general]` profile. This is a special profile name reserved for this purpose.
+
+### Adding Custom CA Certificates
+
+This container supports adding custom CA certificates at runtime. When using `./run.sh` if a ssl directory exists, 
+it will be mounted to the container as `./ssl:/ssl:ro`. Within the container
+if a `/ssl` directory exists and contains `.crt` files, the container will:
+
+1. Copy them into the system certificate store at `/usr/local/share/ca-certificates/`
+2. Run `update-ca-certificates` to install them
 
 ### Indexer Class
 
@@ -318,6 +412,10 @@ The `reindex` parameter determines whether an existing document should be reinde
 ### Docker
 
 The project is designed to be used within a Docker container, so that a crawl job can be run anywhere - on a local machine or on any cloud machine. See the [Dockerfile](https://github.com/vectara/vectara-ingest/blob/main/Dockerfile) for more information on the Docker file structure and build.
+
+#### HTTP Proxy
+
+If the `http_proxy`, `https_proxy`, or `no_proxy` environment variables exist, they will be used during the docker build step.
 
 ### Local deployment
 

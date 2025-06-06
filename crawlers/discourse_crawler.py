@@ -2,7 +2,7 @@ import logging
 from core.crawler import Crawler
 from omegaconf import OmegaConf
 import json
-from core.utils import create_session_with_retries, html_to_text
+from core.utils import create_session_with_retries, html_to_text, configure_session_for_ssl
 from typing import List, Dict, Any
 from datetime import datetime
 
@@ -19,6 +19,7 @@ class DiscourseCrawler(Crawler):
         self.discourse_base_url = self.cfg.discourse_crawler.base_url
         self.discourse_api_key = self.cfg.discourse_crawler.discourse_api_key
         self.session = create_session_with_retries()
+        configure_session_for_ssl(self.session, self.cfg.discourse_crawler)
 
     # function to fetch the topics from the Discourse API
     def get_topics(self) -> List[Dict[str, Any]]:
@@ -55,7 +56,7 @@ class DiscourseCrawler(Crawler):
             'title': topic['title'],
             'metadata': {
                 'created_at': datetime_to_date(topic['created_at']),
-                'last_posted_at': datetime_to_date(topic['last_posted_at']),
+                'last_updated': datetime_to_date(topic['last_posted_at']),
                 'source': 'discourse',
                 'url': self.discourse_base_url + '/t/' + str(topic_id)
             },
@@ -66,7 +67,7 @@ class DiscourseCrawler(Crawler):
                 'text': html_to_text(post['cooked']),
                 'metadata': {
                     'created_at': datetime_to_date(post['created_at']),
-                    'updated_at': datetime_to_date(post['updated_at']),
+                    'last_updated': datetime_to_date(post['updated_at']),
                     'poster': post['username'],
                     'poster_name': post['name'],
                     'source': 'discourse',

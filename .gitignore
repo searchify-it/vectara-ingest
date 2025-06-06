@@ -117,9 +117,14 @@ venv.bak/
 
 # secrets file in TOML format
 secrets.toml
+# certificate authority file
+ca.pem
 
-# Any GDrive credentials file
+# GDrive credentials file
 credentials.json
+
+# Temporary directory for crawler output files
+temp/
 
 # Spyder project settings
 .spyderproject
@@ -143,3 +148,5 @@ dmypy.json
 project.yaml
 
 .idea/
+config-private
+ssl

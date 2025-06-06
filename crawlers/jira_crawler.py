@@ -2,7 +2,8 @@ import logging
 import requests
 import json
 from core.crawler import Crawler
-from core.utils import create_session_with_retries
+from core.utils import create_session_with_retries, configure_session_for_ssl
+
 
 class JiraCrawler(Crawler):
 
@@ -10,6 +11,7 @@ class JiraCrawler(Crawler):
         self.jira_headers = { "Accept": "application/json" }
         self.jira_auth = (self.cfg.jira_crawler.jira_username, self.cfg.jira_crawler.jira_password)
         session = create_session_with_retries()
+        configure_session_for_ssl(session, self.cfg.jira_crawler)
 
         issue_count = 0
         startAt = 0
@@ -33,7 +35,7 @@ class JiraCrawler(Crawler):
                     metadata["reporter"] = issue["fields"]["reporter"]["displayName"]
                     metadata["assignee"] = issue["fields"]["assignee"]["displayName"] if issue["fields"]["assignee"] else None
                     metadata["created"] = issue["fields"]["created"]
-                    metadata["updated"] = issue["fields"]["updated"]
+                    metadata["last_updated"] = issue["fields"]["updated"]
                     metadata["resolved"] = issue["fields"]["resolutiondate"] if "resolutiondate" in issue["fields"] else None
                     metadata["labels"] = issue["fields"]["labels"]
                     metadata["source"] = "jira"
